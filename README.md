@@ -1,5 +1,10 @@
 # ChatGPT Conversation Exporter
 
+[![Version](https://img.shields.io/badge/version-2.2.2-blue.svg)](#)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-brightgreen.svg)](https://www.tampermonkey.net/)
+[![ChatGPT](https://img.shields.io/badge/ChatGPT-chatgpt.com-74aa9c.svg)](https://chatgpt.com)
+
 A Tampermonkey userscript that captures ChatGPT conversations directly from the API and lets you export them as **Raw JSON**, **Clean JSON**, or **Markdown** — all from a sleek in-page panel.
 
 ## Why?
@@ -130,4 +135,4 @@ Code blocks, reasoning/thought content (as blockquotes), and citations (as numbe
 
 ## License
 
-MIT
+This project is licensed under the [MIT License](LICENSE).
