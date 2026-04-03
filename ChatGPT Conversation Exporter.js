@@ -1,8 +1,8 @@
-﻿// export.js
+// export.js
 // ==UserScript==
 // @name         ChatGPT Conversation Exporter
 // @namespace    chatgpt.conversation.exporter
-// @version      2.2.2
+// @version      2.3.4
 // @description  Capture and export ChatGPT conversations in multiple formats (Raw JSON, Clean JSON, Markdown) with an in-page UI panel.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -16,18 +16,26 @@
 
     const w = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
 
-    const BOOT = "__cce_boot_v222__";
+    const BOOT = "__cce_boot_v234__";
     if (w[BOOT]) return;
     w[BOOT] = true;
 
     const SCRIPT_NAME = "ChatGPT Exporter";
-    const VERSION = "2.2.2";
+    const VERSION = "2.3.4";
 
     /* =================================================================
        State — keyed by conversation ID so we survive SPA navigations
        ================================================================= */
     if (!w.__cce_captures__) w.__cce_captures__ = new Map();
     const captures = w.__cce_captures__;
+
+    /* Thinking/reasoning toggle — persisted per browser */
+    let includeThinking = false;
+    try { includeThinking = localStorage.getItem("__cce_think__") === "1"; } catch {}
+    function setIncludeThinking(v) {
+        includeThinking = v;
+        try { localStorage.setItem("__cce_think__", v ? "1" : "0"); } catch {}
+    }
 
     /* =================================================================
        URL helpers
@@ -206,13 +214,156 @@
         return msg.channel === "final" || msg.end_turn;
     }
 
+    /* ---- Thinking / reasoning extraction ---- */
+    function isThinkingToolMsg(msg) {
+        if (msg.author?.role !== "tool") return false;
+        if (msg.metadata?.initial_text === "Thinking") return true;
+        const ft = msg.metadata?.finished_text;
+        if (ft && /^(?:.*동안\s+)?(?:\*\*)?Thought\s+(?:for|about)\b/i.test(ft)) return true;
+        if (ft && /(?:Thought\s+for|동안)\s*$/i.test(ft)) return true;
+        return false;
+    }
+
+    function isThinkingSummaryLine(line) {
+        return /^(?:\d+\S*\s+동안\s+)?(?:\*\*)?Thought\s+(?:for|about)\b/i.test(line)
+            || /^\d+\S*\s+동안\b/i.test(line)
+            || /^Thinking$/i.test(line);
+    }
+
+    function parseThinkingSummary(text) {
+        if (!text) return "Thinking";
+        const clean = text.replace(/\*\*/g, "");
+        const first = clean.split("\n")[0].trim();
+        if (first.length <= 80 && isThinkingSummaryLine(first)) return first;
+        if (first.length <= 80) return first;
+        const m = clean.match(/^(?:\d+\S*\s+동안\s+)?Thought\s+(?:for|about)\b[^\n]{0,80}/i);
+        if (m) return m[0].trim();
+        const dur = clean.match(/(?:Thought\s+)?for\s+(\d+)\s+seconds?\s*$/i);
+        if (dur) return `Thought for ${dur[1]} seconds`;
+        const k = clean.match(/(\d+)\S*\s+동안/);
+        if (k) return `Thought for ${k[1]}s`;
+        return "Thinking";
+    }
+
+    function extractThinkingContent(msg) {
+        const text = extractText(msg).trim();
+        if (text) return text;
+        const ft = msg.metadata?.finished_text;
+        if (!ft || ft.length < 150) return null;
+        const nlIdx = ft.indexOf("\n");
+        if (nlIdx < 0) return null;
+        const firstLine = ft.substring(0, nlIdx).trim();
+        const rest = ft.substring(nlIdx).replace(/^\n+/, "").trim();
+        if (!rest) return null;
+        if (isThinkingSummaryLine(firstLine.replace(/\*\*/g, ""))) return rest;
+        return ft;
+    }
+
+    function fmtThinkingDuration(sec) {
+        if (!sec) return null;
+        sec = Math.round(sec);
+        if (sec < 2) return "Thought briefly";
+        const m = Math.floor(sec / 60), s = sec % 60;
+        if (m > 0) return `Thought for ${m}m ${s}s`;
+        return `Thought for ${sec} seconds`;
+    }
+
+    function buildThinkingMap(msgs) {
+        const map = new Map();
+        let pending = null;
+        for (let i = 0; i < msgs.length; i++) {
+            const msg = msgs[i];
+            const ct = msg.content?.content_type;
+            if (isThinkingToolMsg(msg)) {
+                const content = extractThinkingContent(msg);
+                const sec = msg.metadata?.finished_duration_sec;
+                pending = { summary: parseThinkingSummary(msg.metadata?.finished_text), content };
+                if (sec) { pending.duration_seconds = sec; pending._durSummary = true; }
+                continue;
+            }
+            if (ct === "reasoning_recap") {
+                const sec = msg.metadata?.finished_duration_sec;
+                const s = msg.content?.content || fmtThinkingDuration(sec);
+                pending = pending || {};
+                if (s) pending.summary = s;
+                else if (!pending.summary) pending.summary = "Thinking";
+                if (sec) pending.duration_seconds = sec;
+                continue;
+            }
+            if (ct === "thoughts") {
+                const rawThoughts = msg.content?.thoughts;
+                if (Array.isArray(rawThoughts) && rawThoughts.length > 0) {
+                    pending = pending || { summary: "Thinking" };
+                    if (!pending.thoughts) pending.thoughts = [];
+                    for (const t of rawThoughts) {
+                        if (!t.content && !(Array.isArray(t.chunks) && t.chunks.length)) continue;
+                        const entry = {};
+                        if (t.summary) entry.summary = t.summary;
+                        if (t.content) entry.content = t.content;
+                        if (Array.isArray(t.chunks) && t.chunks.length > 0) entry.chunks = t.chunks;
+                        pending.thoughts.push(entry);
+                        if (t.content) {
+                            pending.content = pending.content
+                                ? pending.content + "\n\n" + t.content : t.content;
+                        }
+                    }
+                    if (!pending._durSummary) {
+                        let last = null;
+                        for (const t of rawThoughts) if (t.summary) last = t.summary;
+                        if (last) pending.summary = last;
+                    }
+                } else {
+                    const text = extractText(msg).trim();
+                    if (text) {
+                        pending = pending || { summary: "Thinking" };
+                        pending.content = pending.content
+                            ? pending.content + "\n\n" + text : text;
+                    }
+                }
+                continue;
+            }
+            if (msg.author?.role === "assistant") {
+                if (msg.metadata?.is_thinking_preamble_message || msg.channel === "commentary") {
+                    const text = extractText(msg).trim();
+                    if (text) {
+                        pending = pending || { summary: "Thinking" };
+                        if (!pending.preambles) pending.preambles = [];
+                        pending.preambles.push(text);
+                    }
+                    continue;
+                }
+                if (ct === "code" && msg.metadata?.reasoning_status === "is_reasoning") continue;
+                if (msg.metadata?.finished_duration_sec && !extractText(msg).trim()) {
+                    const sec = msg.metadata.finished_duration_sec;
+                    const s = fmtThinkingDuration(sec);
+                    pending = pending || {};
+                    if (s) { pending.summary = s; pending._durSummary = true; }
+                    if (sec) pending.duration_seconds = sec;
+                    continue;
+                }
+                if (isRenderedAssistant(msg)) {
+                    if (pending) {
+                        delete pending._durSummary;
+                        map.set(i, pending);
+                        pending = null;
+                    }
+                    continue;
+                }
+            }
+            if (msg.author?.role === "user") pending = null;
+        }
+        return map;
+    }
+
     /* ---- Clean JSON ---- */
     function toCleanJson(json) {
         const msgs = linearize(json);
         const m = meta(json, msgs);
+        const thinkingMap = includeThinking ? buildThinkingMap(msgs) : null;
         const out = [];
 
-        for (const msg of msgs) {
+        for (let i = 0; i < msgs.length; i++) {
+            const msg = msgs[i];
             const role = msg.author?.role;
             if (role !== "user" && role !== "assistant") continue;
             const ct = msg.content?.content_type;
@@ -227,6 +378,14 @@
             if (msg.create_time) entry.timestamp = new Date(msg.create_time * 1000).toISOString();
             if (msg.metadata?.resolved_model_slug) entry.model = msg.metadata.resolved_model_slug;
             if (msg.metadata?.token_count) entry.tokens = msg.metadata.token_count;
+            if (thinkingMap?.has(i)) {
+                const th = thinkingMap.get(i);
+                entry.thinking = { summary: th.summary };
+                if (th.duration_seconds) entry.thinking.duration_seconds = th.duration_seconds;
+                if (th.preambles?.length) entry.thinking.preambles = th.preambles;
+                if (th.content) entry.thinking.content = th.content;
+                if (th.thoughts?.length) entry.thinking.thoughts = th.thoughts;
+            }
             out.push(entry);
         }
 
@@ -282,7 +441,9 @@
     function toMarkdown(json) {
         const msgs = linearize(json);
         const m = meta(json, msgs);
+        const thinkingMap = includeThinking ? buildThinkingMap(msgs) : null;
         const lines = [];
+        let preambleBuf = [];
 
         lines.push(`# ${m.title}`, "");
         const info = [];
@@ -292,7 +453,8 @@
         info.push(`**Messages:** ${m.userCount} user · ${m.botCount} assistant`);
         lines.push(info.join("  \n"), "", "---", "");
 
-        for (const msg of msgs) {
+        for (let i = 0; i < msgs.length; i++) {
+            const msg = msgs[i];
             const role = msg.author?.role;
             const ct = msg.content?.content_type;
 
@@ -300,11 +462,10 @@
             if (ct === "thoughts") continue;
 
             if (ct === "reasoning_recap") {
-                const sec = msg.metadata?.finished_duration_sec;
-                if (sec) {
-                    const mm = Math.floor(sec / 60);
-                    const ss = sec % 60;
-                    lines.push(`> *Thought for ${mm > 0 ? mm + "m " : ""}${ss}s*`, "");
+                if (!includeThinking) {
+                    const recapText = msg.content?.content
+                        || fmtThinkingDuration(msg.metadata?.finished_duration_sec);
+                    if (recapText) preambleBuf.push(recapText);
                 }
                 continue;
             }
@@ -312,7 +473,7 @@
             if (role === "assistant") {
                 if (msg.metadata?.is_thinking_preamble_message || msg.channel === "commentary") {
                     const t = extractText(msg).trim();
-                    if (t) lines.push(`> *${t}*`, "");
+                    if (t) preambleBuf.push(t);
                     continue;
                 }
                 if (ct === "code" && msg.metadata?.reasoning_status === "is_reasoning") continue;
@@ -320,8 +481,34 @@
 
                 const model = msg.metadata?.resolved_model_slug ?? m.model;
                 lines.push(`# ChatGPT *(${model})*`, "");
+
+                if (preambleBuf.length) {
+                    // for (const p of preambleBuf) lines.push(`> *${p}*`, "");
+                    for (const p of preambleBuf) lines.push(`*${p}*`, "");
+                    lines.push("");
+                    preambleBuf = [];
+                }
+
+                if (thinkingMap?.has(i)) {
+                    const th = thinkingMap.get(i);
+                    if (th.content || th.thoughts?.length) {
+                        lines.push("<details>", `<summary><b>${escHtml(th.summary)}</b></summary>`, "");
+                        if (th.thoughts?.length) {
+                            for (const t of th.thoughts) {
+                                if (t.summary) lines.push(`**${t.summary}**`, "");
+                                if (t.content) lines.push(t.content, "");
+                            }
+                        } else if (th.content) {
+                            lines.push(th.content, "");
+                        }
+                        lines.push("</details>", "");
+                    } else if (th.summary) {
+                        lines.push(`*${th.summary}*`, "");
+                    }
+                }
             } else if (role === "user") {
                 lines.push("# You", "");
+                preambleBuf = [];
             }
 
             let text = extractText(msg);
@@ -466,6 +653,7 @@
         copy:     `<svg ${svgAttrs}><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
         md:       `<svg ${svgAttrs}><path d="M2 4h20v16H2z"/><path d="M6 12V8l2 2 2-2v4"/><path d="M18 12l-2-2v4"/><path d="M16 10v4"/></svg>`,
         json:     `<svg ${svgAttrs}><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`,
+        think:    `<svg ${svgAttrs}><path d="M12 2a7 7 0 0 0-4 12.7V16a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-1.3A7 7 0 0 0 12 2z"/><line x1="9" y1="18" x2="15" y2="18"/><line x1="10" y1="21" x2="14" y2="21"/></svg>`,
     };
 
     function icon(name, size = 16) {
@@ -593,7 +781,7 @@
 
         /* ---- export rows ---- */
         const actions = document.createElement("div");
-        Object.assign(actions.style, { padding: "10px 16px 14px" });
+        Object.assign(actions.style, { padding: "0 16px" });
 
         function makeRow(label, iconName, onDl, onCopy) {
             const row = document.createElement("div");
@@ -622,8 +810,44 @@
             return row;
         }
 
+        function makeToggleRow() {
+            const row = document.createElement("div");
+            Object.assign(row.style, {
+                display: "flex", alignItems: "center", gap: "8px",
+                padding: "7px 0", borderBottom: `1px solid ${T.border}`,
+            });
+
+            row.appendChild(icon("think", 16));
+            const lbl = Object.assign(document.createElement("span"), { textContent: "Include thinking" });
+            Object.assign(lbl.style, { flex: "1", fontWeight: "500", fontSize: "13px" });
+            row.appendChild(lbl);
+
+            const sw = document.createElement("div");
+            Object.assign(sw.style, {
+                width: "36px", height: "20px", borderRadius: "10px",
+                background: includeThinking ? "#10a37f" : T.btn, cursor: "pointer",
+                transition: "background .2s ease", position: "relative", flexShrink: "0",
+            });
+            const knob = document.createElement("div");
+            Object.assign(knob.style, {
+                width: "16px", height: "16px", borderRadius: "50%",
+                background: "#fff", position: "absolute", top: "2px",
+                left: includeThinking ? "18px" : "2px",
+                transition: "left .2s ease", boxShadow: "0 1px 3px rgba(0,0,0,.3)",
+            });
+            sw.appendChild(knob);
+            sw.addEventListener("click", () => {
+                setIncludeThinking(!includeThinking);
+                knob.style.left = includeThinking ? "18px" : "2px";
+                sw.style.background = includeThinking ? "#10a37f" : T.btn;
+            });
+            row.appendChild(sw);
+            return row;
+        }
+
         if (m) {
             actions.append(
+                makeToggleRow(),
                 makeRow("Raw JSON",   "json", dlRaw, null),
                 makeRow("Clean JSON", "json", dlClean, cpClean),
                 makeRow("Markdown",   "md",   dlMarkdown, cpMarkdown),

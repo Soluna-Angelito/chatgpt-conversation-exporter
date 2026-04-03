@@ -1,6 +1,6 @@
 # ChatGPT Conversation Exporter
 
-[![Version](https://img.shields.io/badge/version-2.2.2-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-2.3.0-blue.svg)](#)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-brightgreen.svg)](https://www.tampermonkey.net/)
 [![ChatGPT](https://img.shields.io/badge/ChatGPT-chatgpt.com-74aa9c.svg)](https://chatgpt.com)
@@ -18,6 +18,11 @@ ChatGPT has no built-in per-conversation export. This script intercepts the same
   - **Raw JSON** — the complete API payload, pretty-printed.
   - **Clean JSON** — linearized messages with role, content, timestamp, model, and token count; strips internal markers and hidden system messages.
   - **Markdown** — human-readable document with title, metadata, speaker headings, code fences, reasoning/thought blocks as blockquotes, and resolved citation footnotes.
+- **Include thinking toggle** — optionally export the model's chain-of-thought / reasoning content. When enabled:
+  - **Clean JSON** adds a `thinking` field (with summary and full content) to assistant messages.
+  - **Markdown** renders thinking as collapsible `<details>` blocks with the summary as the header.
+  - Supports o1-style thinking tool messages, `reasoning_recap`, and `thoughts` content types.
+  - Preference is persisted in `localStorage` across sessions.
 - **Download or copy** — every format can be downloaded as a file; Clean JSON and Markdown can also be copied to the clipboard.
 - **Floating Action Button** — a small download icon sits in the bottom-right corner; turns **green** when the current conversation has captured data.
 - **Info panel** — shows conversation title, model, message counts, creation/update dates, and conversation ID.
@@ -61,7 +66,7 @@ A simplified structure focused on the visible conversation:
 {
   "title": "My Conversation",
   "id": "abc-123",
-  "model": "gpt-4o",
+  "model": "o1",
   "created_at": "2025-06-01T12:00:00.000Z",
   "updated_at": "2025-06-01T12:05:00.000Z",
   "messages": [
@@ -72,14 +77,20 @@ A simplified structure focused on the visible conversation:
     },
     {
       "role": "assistant",
+      "thinking": {
+        "summary": "Thought for 5 seconds",
+        "content": "The user said hello, I should greet them back..."
+      },
       "content": "Hi there! How can I help you today?",
-      "model": "gpt-4o",
+      "model": "o1",
       "tokens": 42,
       "timestamp": "2025-06-01T12:00:03.000Z"
     }
   ]
 }
 ```
+
+The `thinking` field is only present when the **Include thinking** toggle is enabled. It contains a `summary` (the display label) and optionally a `content` field with the full chain-of-thought text.
 
 Hidden system messages, empty assistant stubs, and internal citation markers (PUA characters) are stripped automatically.
 
@@ -90,7 +101,7 @@ A human-readable document:
 ```markdown
 # My Conversation
 
-- **Model:** gpt-4o
+- **Model:** o1
 - **Created:** Jun 1, 2025, 12:00 PM
 - **Updated:** Jun 1, 2025, 12:05 PM
 - **Messages:** 4 user · 5 assistant
@@ -103,12 +114,21 @@ Hello!
 
 ---
 
-## ChatGPT *(gpt-4o)*
+## ChatGPT *(o1)*
+
+<details>
+<summary><b>Thought for 5 seconds</b></summary>
+
+The user said hello, I should greet them back...
+
+</details>
 
 Hi there! How can I help you today?
 ```
 
-Code blocks, reasoning/thought content (as blockquotes), and citations (as numbered footnotes with links) are all preserved.
+When **Include thinking** is off, the `<details>` block is omitted and thinking is shown as a brief blockquote (e.g. `> *Thought for 5s*`) instead.
+
+Code blocks, reasoning/thought content, and citations (as numbered footnotes with links) are all preserved.
 
 ## Keyboard Shortcut
 

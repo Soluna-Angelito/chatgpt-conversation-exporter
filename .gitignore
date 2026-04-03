@@ -1,0 +1,9 @@
+# Strict allowlist to prevent accidental personal-file commits.
+# Everything is ignored by default unless explicitly allowed below.
+/*
+
+# Repository metadata and intentionally tracked files.
+!/.gitignore
+!/ChatGPT Conversation Exporter.js
+!/README.md
+!/LICENSE
